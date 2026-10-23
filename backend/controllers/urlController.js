@@ -19,14 +19,16 @@ function isValidHttpUrl(urlString) {
   }
 }
 
+const RESERVED_WORDS = new Set(['api', 'health', 'admin', 'stats', 'links']);
+
 /**
  * POST /api/shorten
- * Body: { longUrl, expiresAt? }
- * Validates URL, increments atomic counter, encodes into Base62, and returns short URL.
+ * Body: { longUrl, expiresAt?, alias? }
+ * Validates URL, handles custom alias or increments atomic counter, encodes into Base62, and returns short URL.
  */
 export async function shortenUrl(req, res, next) {
   try {
-    const { longUrl, expiresAt } = req.body;
+    const { longUrl, expiresAt, alias } = req.body;
 
     if (!longUrl || !isValidHttpUrl(longUrl)) {
       return res.status(400).json({
@@ -42,10 +44,17 @@ export async function shortenUrl(req, res, next) {
     }
 
     // Security edge case: Prevent self-referential redirect loops
-    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const rawBaseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
     const parsedLongUrl = new URL(longUrl);
     const parsedBaseUrl = new URL(baseUrl);
-    if (parsedLongUrl.host === parsedBaseUrl.host) {
+    const loopbacks = new Set(['localhost', '127.0.0.1', '::1']);
+
+    if (
+      parsedLongUrl.host === parsedBaseUrl.host ||
+      parsedLongUrl.hostname === parsedBaseUrl.hostname ||
+      (loopbacks.has(parsedLongUrl.hostname) && loopbacks.has(parsedBaseUrl.hostname))
+    ) {
       return res.status(400).json({
         error: 'Shortening URLs that point to this service is not permitted.',
       });
@@ -53,7 +62,18 @@ export async function shortenUrl(req, res, next) {
 
     // Validation for optional expiration date
     let expirationDate = null;
-    if (expiresAt) {
+    if (
+      expiresAt !== undefined &&
+      expiresAt !== null &&
+      !(typeof expiresAt === 'string' && expiresAt.trim() === '')
+    ) {
+      // Reject non-date types such as booleans (new Date(false) evaluates to 1970)
+      if (typeof expiresAt === 'boolean') {
+        return res.status(400).json({
+          error: 'Invalid expiresAt date format. Provide a valid ISO date string.',
+        });
+      }
+
       const parsedDate = new Date(expiresAt);
       if (isNaN(parsedDate.getTime())) {
         return res.status(400).json({
@@ -68,23 +88,79 @@ export async function shortenUrl(req, res, next) {
       expirationDate = parsedDate;
     }
 
-    // Atomically increment the sequence counter.
-    // If not existing, it will be upserted (starts from 100000 via db seed).
-    const counterDoc = await Counter.findOneAndUpdate(
-      { _id: 'url' },
-      { $inc: { seq: 1 } },
-      { new: true, upsert: true }
-    );
+    let code;
 
-    // Encode sequence integer into Base62 string (e.g., 100001 -> "q0X")
-    const code = encode(counterDoc.seq);
+    const isCustomAlias =
+      alias !== undefined &&
+      alias !== null &&
+      !(typeof alias === 'string' && alias.trim() === '');
 
-    // Save mapping to database
-    await Url.create({
-      code,
-      longUrl,
-      expiresAt: expirationDate,
-    });
+    if (isCustomAlias) {
+      // 3-20 characters, letters/numbers/hyphen only, case-sensitive
+      if (typeof alias !== 'string' || !/^[0-9a-zA-Z-]{3,20}$/.test(alias)) {
+        return res.status(400).json({
+          error: 'Alias must be 3-20 characters long and contain only letters, numbers, and hyphens.',
+        });
+      }
+
+      // Check reserved words (case-insensitive)
+      if (RESERVED_WORDS.has(alias.toLowerCase())) {
+        return res.status(400).json({
+          error: `The alias '${alias}' is a reserved word and cannot be used.`,
+        });
+      }
+
+      code = alias;
+
+      // Save mapping to database, catching E11000 duplicate key error to safely handle race conditions
+      try {
+        await Url.create({
+          code,
+          longUrl,
+          expiresAt: expirationDate,
+        });
+      } catch (err) {
+        if (err.code === 11000) {
+          return res.status(409).json({
+            error: 'Alias is already in use.',
+          });
+        }
+        throw err;
+      }
+    } else {
+      // Collision retry for generated codes: loop up to 5 attempts
+      let created = false;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const counterDoc = await Counter.findOneAndUpdate(
+          { _id: 'url' },
+          { $inc: { seq: 1 } },
+          { new: true, upsert: true }
+        );
+
+        code = encode(counterDoc.seq);
+
+        try {
+          await Url.create({
+            code,
+            longUrl,
+            expiresAt: expirationDate,
+          });
+          created = true;
+          break;
+        } catch (err) {
+          if (err.code === 11000) {
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      if (!created) {
+        return res.status(500).json({
+          error: 'Could not generate a unique code. Please try again.',
+        });
+      }
+    }
 
     const shortUrl = `${baseUrl}/${code}`;
 
@@ -113,15 +189,17 @@ export async function redirectUrl(req, res, next) {
       });
     }
 
-    // Check optional expiration date
-    if (urlRecord.expiresAt && new Date(urlRecord.expiresAt) < new Date()) {
-      return res.status(404).json({
+    // Check optional expiration date (returns 410 Gone if expired)
+    if (urlRecord.expiresAt && new Date(urlRecord.expiresAt) <= new Date()) {
+      return res.status(410).json({
         error: 'Short URL has expired',
       });
     }
 
-    // Increment click count (non-blocking for performance, but handled reliably)
-    await Url.updateOne({ _id: urlRecord._id }, { $inc: { clicks: 1 } });
+    // Fire-and-forget click increment with .catch logging so counter failures never block redirects
+    Url.updateOne({ _id: urlRecord._id }, { $inc: { clicks: 1 } }).catch((err) => {
+      console.error('Failed to increment clicks:', err);
+    });
 
     // 302 Found: Temporary redirect allows subsequent visits to be tracked by our server
     return res.redirect(302, urlRecord.longUrl);

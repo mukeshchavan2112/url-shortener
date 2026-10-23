@@ -27,6 +27,9 @@ const urlSchema = new mongoose.Schema({
   },
 });
 
+// TTL index to automatically remove expired documents
+urlSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 const Url = mongoose.model('Url', urlSchema);
 
 export default Url;

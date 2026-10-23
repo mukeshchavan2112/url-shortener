@@ -9,6 +9,9 @@ import { errorHandler } from './middleware/errorHandler.js';
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Enable trust proxy for reverse proxies (Render, Heroku, etc.)
+app.set('trust proxy', 1);
+
 // Connect to MongoDB before accepting requests
 await connectDB();
 
