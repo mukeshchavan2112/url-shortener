@@ -1,5 +1,6 @@
 import Url from '../models/Url.js';
 import Counter from '../models/Counter.js';
+import Click from '../models/Click.js';
 import { encode } from '../utils/base62.js';
 
 /**
@@ -201,6 +202,17 @@ export async function redirectUrl(req, res, next) {
       console.error('Failed to increment clicks:', err);
     });
 
+    // Fire-and-forget click logging with .catch so click logging failures never delay or break the redirect
+    const referrer = (req.get('Referer') || '').slice(0, 500);
+    const userAgent = (req.get('User-Agent') || '').slice(0, 500);
+    Click.create({
+      code: urlRecord.code,
+      referrer,
+      userAgent,
+    }).catch((err) => {
+      console.error('Failed to log click:', err);
+    });
+
     // 302 Found: Temporary redirect allows subsequent visits to be tracked by our server
     return res.redirect(302, urlRecord.longUrl);
   } catch (error) {
@@ -217,4 +229,71 @@ export function getHealth(req, res) {
     status: 'ok',
     uptime: process.uptime(),
   });
+}
+
+/**
+ * GET /api/stats/:code
+ * Returns click statistics and metadata for a given short code.
+ * Responds with { code, longUrl, createdAt, expiresAt, totalClicks, recentClicks }.
+ * recentClicks contains the last 20 Click entries (ts, referrer, userAgent) ordered newest first.
+ */
+export async function getUrlStats(req, res, next) {
+  try {
+    const { code } = req.params;
+
+    const urlRecord = await Url.findOne({ code });
+
+    if (!urlRecord) {
+      return res.status(404).json({
+        error: 'Short URL not found',
+      });
+    }
+
+    const recentClicks = await Click.find({ code })
+      .sort({ ts: -1 })
+      .limit(20)
+      .select('ts referrer userAgent -_id')
+      .lean();
+
+    return res.status(200).json({
+      code: urlRecord.code,
+      longUrl: urlRecord.longUrl,
+      createdAt: urlRecord.createdAt,
+      expiresAt: urlRecord.expiresAt,
+      totalClicks: urlRecord.clicks,
+      recentClicks,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/links
+ * Returns the 50 most recent links (code, longUrl, shortUrl, clicks, createdAt, expiresAt), newest first.
+ * shortUrl is built from BASE_URL.
+ */
+export async function getRecentLinks(req, res, next) {
+  try {
+    const rawBaseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+
+    const urlRecords = await Url.find()
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    const links = urlRecords.map((url) => ({
+      code: url.code,
+      longUrl: url.longUrl,
+      shortUrl: `${baseUrl}/${url.code}`,
+      clicks: url.clicks,
+      createdAt: url.createdAt,
+      expiresAt: url.expiresAt,
+    }));
+
+    return res.status(200).json(links);
+  } catch (error) {
+    next(error);
+  }
 }
