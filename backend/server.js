@@ -17,12 +17,9 @@ await connectDB();
 
 // Security and utility middleware
 app.use(helmet());
-const rawClientUrl = process.env.CLIENT_URL;
-console.log('RAW CLIENT_URL:', JSON.stringify(rawClientUrl));
-const allowedOrigins = (rawClientUrl || 'http://localhost:5173')
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:5173')
   .split(',')
   .map((o) => o.trim().replace(/\/$/, ''));
-console.log('CORS allowed origins:', allowedOrigins);
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
