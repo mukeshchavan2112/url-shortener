@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getStats, getErrorMessage } from '../api.js';
 
@@ -8,42 +8,99 @@ export default function Stats() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState('');
-
+  const requestIdRef = useRef(0);
+  const statsRef = useRef(stats);
   useEffect(() => {
-    let isMounted = true;
+    statsRef.current = stats;
+  }, [stats]);
 
-    async function fetchStats() {
-      setLoading(true);
-      setError('');
-      setNotFound(false);
-      try {
-        const data = await getStats(code);
-        if (isMounted) {
-          setStats(data);
-        }
-      } catch (err) {
-        if (isMounted) {
-          if (err.response && err.response.status === 404) {
-            setNotFound(true);
-          } else {
-            setError(getErrorMessage(err));
-          }
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
+  const [prevCode, setPrevCode] = useState(code);
+  if (prevCode !== code) {
+    setPrevCode(code);
+    setStats(null);
+    setLoading(true);
+    setNotFound(false);
+    setError('');
+  }
+
+  const loadStats = useCallback(async () => {
+    if (!code) return;
+    const reqId = ++requestIdRef.current;
+
+    try {
+      const data = await getStats(code);
+      if (reqId === requestIdRef.current) {
+        setStats(data);
+        setError('');
+        setNotFound(false);
+      }
+    } catch (err) {
+      if (reqId === requestIdRef.current) {
+        if (err.response && err.response.status === 404) {
+          setNotFound(true);
+        } else {
+          setError((prev) => (statsRef.current ? prev : getErrorMessage(err)));
         }
       }
+    } finally {
+      if (reqId === requestIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [code]);
+
+  useEffect(() => {
+    let intervalId = null;
+
+    queueMicrotask(() => {
+      loadStats();
+    });
+
+    const startPolling = () => {
+      if (!intervalId) {
+        intervalId = setInterval(() => {
+          if (document.visibilityState === 'visible') {
+            loadStats();
+          }
+        }, 5000);
+      }
+    };
+
+    const stopPolling = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        loadStats();
+        startPolling();
+      } else {
+        stopPolling();
+      }
+    };
+
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        loadStats();
+      }
+    };
+
+    if (document.visibilityState === 'visible') {
+      startPolling();
     }
 
-    if (code) {
-      fetchStats();
-    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
 
     return () => {
-      isMounted = false;
+      stopPolling();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
     };
-  }, [code]);
+  }, [code, loadStats]);
 
   if (loading) {
     return (
@@ -105,9 +162,18 @@ export default function Stats() {
               Analytics and telemetry for short code <span className="code-badge">{stats.code}</span>
             </p>
           </div>
-          <Link to="/links" className="btn btn-secondary btn-sm">
-            &larr; Back to recent links
-          </Link>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={loadStats}
+              className="btn btn-secondary btn-sm"
+            >
+              Refresh
+            </button>
+            <Link to="/links" className="btn btn-secondary btn-sm">
+              &larr; Back to recent links
+            </Link>
+          </div>
         </div>
 
         <div className="stats-summary-grid">

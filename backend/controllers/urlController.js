@@ -255,6 +255,7 @@ export async function getUrlStats(req, res, next) {
       .select('ts referrer userAgent -_id')
       .lean();
 
+    res.set('Cache-Control', 'no-store');
     return res.status(200).json({
       code: urlRecord.code,
       longUrl: urlRecord.longUrl,
@@ -292,6 +293,7 @@ export async function getRecentLinks(req, res, next) {
       expiresAt: url.expiresAt,
     }));
 
+    res.set('Cache-Control', 'no-store');
     return res.status(200).json(links);
   } catch (error) {
     next(error);

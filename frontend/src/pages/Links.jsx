@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { getLinks, getErrorMessage } from '../api.js';
 
@@ -6,44 +6,102 @@ export default function Links() {
   const [links, setLinks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const requestIdRef = useRef(0);
+  const hasLoadedRef = useRef(false);
 
-  useEffect(() => {
-    let isMounted = true;
+  const loadLinks = useCallback(async () => {
+    const reqId = ++requestIdRef.current;
 
-    async function fetchLinks() {
-      setLoading(true);
-      setError('');
-      try {
-        const data = await getLinks();
-        if (isMounted) {
-          setLinks(data);
-        }
-      } catch (err) {
-        if (isMounted) {
+    try {
+      const data = await getLinks();
+      if (reqId === requestIdRef.current) {
+        setLinks(data);
+        hasLoadedRef.current = true;
+        setError('');
+      }
+    } catch (err) {
+      if (reqId === requestIdRef.current) {
+        if (!hasLoadedRef.current) {
           setError(getErrorMessage(err));
         }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+      }
+    } finally {
+      if (reqId === requestIdRef.current) {
+        setLoading(false);
       }
     }
+  }, []);
 
-    fetchLinks();
+  useEffect(() => {
+    let intervalId = null;
+
+    queueMicrotask(() => {
+      loadLinks();
+    });
+
+    const startPolling = () => {
+      if (!intervalId) {
+        intervalId = setInterval(() => {
+          if (document.visibilityState === 'visible') {
+            loadLinks();
+          }
+        }, 5000);
+      }
+    };
+
+    const stopPolling = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        loadLinks();
+        startPolling();
+      } else {
+        stopPolling();
+      }
+    };
+
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        loadLinks();
+      }
+    };
+
+    if (document.visibilityState === 'visible') {
+      startPolling();
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
 
     return () => {
-      isMounted = false;
+      stopPolling();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
     };
-  }, []);
+  }, [loadLinks]);
 
   return (
     <div className="page-content">
       <div className="card">
-        <div className="card-header">
-          <h1 className="page-title">Recent links</h1>
-          <p className="page-subtitle">
-            Showing the 50 most recently created shortened URLs.
-          </p>
+        <div className="card-header-flex">
+          <div>
+            <h1 className="page-title">Recent links</h1>
+            <p className="page-subtitle">
+              Showing the 50 most recently created shortened URLs.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={loadLinks}
+            className="btn btn-secondary btn-sm"
+          >
+            Refresh
+          </button>
         </div>
 
         {loading && <div className="state-message">Loading links...</div>}
@@ -59,7 +117,7 @@ export default function Links() {
           </div>
         )}
 
-        {!loading && !error && links.length > 0 && (
+        {!loading && links.length > 0 && (
           <div className="table-responsive">
             <table className="data-table">
               <thead>
